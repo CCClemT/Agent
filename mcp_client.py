@@ -8,7 +8,7 @@ from mcp.client.stdio import stdio_client
 
 from openai import OpenAI
 from dotenv import load_dotenv
-from agent import ReActAgent
+from utils import get_api_key
 
 load_dotenv()
 
@@ -19,7 +19,7 @@ class MCPClient:
         #self.client = AsyncOpenAI()
         self.client = OpenAI(
             base_url="https://api.deepseek.com",
-            api_key=ReActAgent.get_api_key()
+            api_key=get_api_key()
         )        
         self.tools = []  # 初始化工具列表
         self.stdio = None

@@ -43,11 +43,6 @@ react_system_prompt_template = """
 
 ⸻
 
-先前的对话：
-${conversation_history}
-
-⸻
-
 本次任务可用工具：
 ${tool_list}
 
