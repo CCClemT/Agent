@@ -33,51 +33,64 @@ class ReActAgent:
         self.mcp_tools = {}
 
     async def run(self, user_input: str):
-        await self.connect_mcp_server()
-        #构建对话消息
+        await self.connect_mcp_server()  # 确保 MCP 已连接
+        # 构建对话消息
         messages = [
             {"role": "system", "content": self.render_system_prompt(react_system_prompt_template)},
-            #读取系统提示词
             {"role": "user", "content": f"<question>{user_input}</question>"},
         ]
 
         while True:
-
-            #请求模型
+            # 请求模型
             content = await self.call_model(messages)
 
-            #检测Thought
-            tought_match = re.search(r"<thought>(.*?)</thought>", content, re.DOTALL)
-            if tought_match:
-                thought = tought_match.group(1)
-                print(f"\nThought: {thought}\n")
+            # 检测 Thought
+            thought_match = re.search(r"<thought>(.*?)</thought>", content, re.DOTALL)
+            if thought_match:
+                thought = thought_match.group(1)
+                print(f"\n Thought: {thought}\n")
             
-            #检测是否为Final Answer,是则输出最终答案
+            # 检测是否为 Final Answer
             if "<final_answer>" in content:
                 final_answer = re.search(r"<final_answer>(.*?)</final_answer>", content, re.DOTALL)
+                print(f"\n Final Answer: {final_answer.group(1)}\n")
                 return final_answer.group(1)
             
-            #检测Action
+            # 检测 Action
             action_match = re.search(r"<action>(.*?)</action>", content, re.DOTALL)
             if not action_match:
                 raise RuntimeError("模型输出不合法,缺少<action>标签")
             action = action_match.group(1)
-            tool_name,args = self.parse_action(action)
+            tool_name, args = self.parse_action(action)
             print(f"\n Action: {tool_name}({', '.join(args)})\n")
-            # 只有终端命令才需要询问用户,其他的工具直接执行
-            should_continue = input(f"\n\n是否继续?(Y/N)") if tool_name == "run_terminal_command" else "y"
+
+            # 只有终端命令才需要询问用户，其他工具直接执行
+            should_continue = input("\n是否继续?(Y/N) ") if tool_name == "run_terminal_command" else "y"
             if should_continue.lower() != 'y':
-                print("\n\n操作已取消。\n")
+                print("\n操作已取消。")
                 return "操作被用户取消"
             
             try:
-                observation = self.tools[tool_name](*args)
+                # 1. 优先使用本地工具
+                if tool_name in self.tools:
+                    observation = self.tools[tool_name](*args)
+                # 2. 不存在则调用 MCP 工具
+                elif tool_name in self.mcp_tools:
+                    # 异步调用
+                    observation = await self.mcp_client.call_tool(tool_name, args or {})
+                # 3. 工具不存在
+                else:
+                    observation = f"错误：工具 {tool_name} 不存在"
+            
             except Exception as e:
-                observation = f"工具执行出错:{str(e)}"
+                observation = f"工具执行出错: {str(e)}"
+            
+            # 输出观测结果
             print(f"\n Observation: {observation}\n")
+            
+            # 加入对话历史
             obs_msg = f"<observation>{observation}</observation>"
             messages.append({"role": "user", "content": obs_msg})
-            #print(f"\n当前消息列表: {messages}\n")
     
     @staticmethod
     def get_mcp_server_path():
@@ -93,25 +106,12 @@ class ReActAgent:
             return
         try:
             await self.mcp_client.connect_to_server(self.mcp_server_path)
-            # 获取 MCP 工具
-            mcp_tool_list = self.mcp_client.tools
-            # 把 MCP 工具 合并到 self.tools
-            added = 0
-            for tool in mcp_tool_list:
-                tool_name = tool.name
-                if tool_name not in self.tools:
-                    self.tools[tool_name] = tool  # 加入主工具列表
-                    added += 1
+            # 获取 MCP 工具并单独存储
+            self.mcp_tools = {tool.name: tool for tool in self.mcp_client.tools}
             self.mcp_connected = True
-            print(f"\nMCP 连接成功，已添加 {added} 个工具到 agent.tools")
         except Exception as e:
             print(f"\nMCP 连接失败：{e}")
             self.mcp_connected = False
-        finally:
-            try:
-                await self.mcp_client.cleanup()
-            except:
-                pass
 
     async def call_model(self, message):
         print(f"\n正在请求模型,请稍等...\n")
@@ -198,7 +198,7 @@ class ReActAgent:
             return arg_str
 
     def get_tool_list(self) -> str:
-        """生成工具列表：本地 + MCP 已经全部在 self.tools 里"""
+        """生成工具列表：仅包含本地工具（MCP工具不合并）"""
         tool_descriptions = []
         for func in self.tools.values():
             name = func.__name__
@@ -207,18 +207,26 @@ class ReActAgent:
             tool_descriptions.append(f"- {name}{signature}: {doc}")
         return "\n".join(tool_descriptions)
 
-    def render_system_prompt(self, system_prompt_template: str)-> str:
+    def render_system_prompt(self, system_prompt_template: str) -> str:
         # 渲染系统提示词,替换占位符
         tool_list = self.get_tool_list()
+        # MCP工具列表
+        mcp_tool_list = []
+        if self.mcp_connected == True and self.mcp_tools:
+            mcp_tool_list = [f"{tool}" for tool in self.mcp_tools]
+        mcp_tool_str = ", ".join(mcp_tool_list) if mcp_tool_list else ""
+
         # 生成文件列表时,将反斜杠替换为正斜杠
         file_list = ", ".join(
             os.path.abspath(os.path.join(self.project_directory, f)).replace("\\", "/")
             for f in os.listdir(self.project_directory)
         )
+        
         return Template(system_prompt_template).substitute(
             operating_system=self.get_operating_system_name(),
             tool_list=tool_list,
-            file_list=file_list
+            file_list=file_list,
+            mcp_tool_list=mcp_tool_str
         )
     
     def get_operating_system_name(self):
@@ -255,15 +263,13 @@ def main(project_directory):
     agent = ReActAgent(tools = tools, model="deepseek-chat", project_directory=project_dir)
     while True:
         task = input("请输入任务:")
-
-        asyncio.run(agent.run(task))
-
+        if not task:
+            continue
         if task.lower() in ["exit", "quit"]:
             print("退出程序。")
             break
 
-
-
+        asyncio.run(agent.run(task))
 
 if __name__ == "__main__":
     main()

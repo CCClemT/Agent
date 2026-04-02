@@ -45,6 +45,8 @@ react_system_prompt_template = """
 
 本次任务可用工具：
 ${tool_list}
+MCP工具：
+${mcp_tool_list}
 
 ⸻
 
